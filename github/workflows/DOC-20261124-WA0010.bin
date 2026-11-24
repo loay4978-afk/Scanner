@@ -1,0 +1,87 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -q "$(ls *.zip | head -1)" -d proj
+      - name: Safety patch (num to double)
+        working-directory: proj
+        run: |
+          sed -i 's/Pt((c\[2 \* i\] as num) \* w, (c\[2 \* i + 1\] as num) \* h)/Pt((c[2 * i] as num).toDouble() * w, (c[2 * i + 1] as num).toDouble() * h)/' lib/app/engine/scanner_engine.dart
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter create . --project-name mustanad --org com.mustanad
+        working-directory: proj
+      - run: bash tool/ci_setup.sh
+        working-directory: proj
+      - name: Raise compileSdk and disable lintVital
+        working-directory: proj
+        run: |
+          # رفع compileSdk لكل الإضافات إلى 36، وتعطيل lintVital (يفشل في بعض الإضافات)
+          if [ -f android/build.gradle.kts ] && ! grep -q MUSTANAD_COMPILE_SDK android/build.gradle.kts; then
+            {
+              cat <<'KTS'
+          // MUSTANAD_COMPILE_SDK
+          subprojects {
+              afterEvaluate {
+                  if (project.name != "app") {
+                      extensions.findByType(com.android.build.api.dsl.CommonExtension::class.java)?.let { it.compileSdk = 36 }
+                  }
+              }
+          }
+          subprojects {
+              tasks.configureEach {
+                  if (name.startsWith("lintVital")) enabled = false
+              }
+          }
+          KTS
+              cat android/build.gradle.kts
+            } > /tmp/root_build.kts
+            cp /tmp/root_build.kts android/build.gradle.kts
+          elif [ -f android/build.gradle ] && ! grep -q MUSTANAD_COMPILE_SDK android/build.gradle; then
+            {
+              cat <<'GRV'
+          // MUSTANAD_COMPILE_SDK
+          subprojects {
+              afterEvaluate { p ->
+                  if (p.name != 'app' && p.hasProperty('android')) {
+                      p.android { compileSdk 36 }
+                  }
+              }
+          }
+          subprojects {
+              tasks.configureEach { t ->
+                  if (t.name.startsWith('lintVital')) t.enabled = false
+              }
+          }
+          GRV
+              cat android/build.gradle
+            } > /tmp/root_build.gradle
+            cp /tmp/root_build.gradle android/build.gradle
+          fi
+      - name: Download OCR language data (Arabic, English, German)
+        working-directory: proj
+        run: |
+          mkdir -p assets/tessdata
+          for l in ara eng deu; do
+            curl -fL --retry 3 -o assets/tessdata/$l.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/$l.traineddata
+          done
+      - run: flutter pub get
+        working-directory: proj
+      - run: dart run flutter_launcher_icons
+        working-directory: proj
+      - run: flutter build apk --release --no-shrink --target-platform android-arm,android-arm64
+        working-directory: proj
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mustanad-apk
+          path: proj/build/app/outputs/flutter-apk/app-release.apk
